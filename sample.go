@@ -3,6 +3,13 @@ package main
 import (
 	"encoding/xml"
 	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"strconv"
+	"time"
+
 	"github.com/sbzhu/weworkapi_golang/wxbizmsgcrypt"
 )
 
@@ -16,116 +23,145 @@ type MsgContent struct {
 	Agentid      uint32 `xml:"AgentId"`
 }
 
-func main() {
+var wxcpt *wxbizmsgcrypt.WXBizMsgCrypt
+
+func init() {
 	token := "xxxxxxxxxx"
 	receiverId := "wx5823bf96d3bd56c7"
 	encodingAeskey := "xxxxxxxxxxxxxxxx"
-	wxcpt := wxbizmsgcrypt.NewWXBizMsgCrypt(token, encodingAeskey, receiverId, wxbizmsgcrypt.XmlType)
-	/*
-	   	------------使用示例一：验证回调URL---------------
-	   	*企业开启回调模式时，企业微信会向验证url发送一个get请求
-	   	假设点击验证时，企业收到类似请求：
-	   	* GET /cgi-bin/wxpush?msg_signature=5c45ff5e21c57e6ad56bac8758b79b1d9ac89fd3&timestamp=1409659589&nonce=263014780&echostr=P9nAzCzyDtyTWESHep1vC5X9xho%2FqYX3Zpb4yKa9SKld1DsH3Iyt3tP3zNdtp%2B4RPcs8TgAE7OaBO%2BFZXvnaqQ%3D%3D
-	   	* HTTP/1.1 Host: qy.weixin.qq.com
+	wxcpt = wxbizmsgcrypt.NewWXBizMsgCrypt(token, encodingAeskey, receiverId, wxbizmsgcrypt.XmlType)
+}
 
-	   	接收到该请求时，企业应
-	        1.解析出Get请求的参数，包括消息体签名(msg_signature)，时间戳(timestamp)，随机数字串(nonce)以及企业微信推送过来的随机加密字符串(echostr),
-	        这一步注意作URL解码。
-	        2.验证消息体签名的正确性
-	        3. 解密出echostr原文，将原文当作Get请求的response，返回给企业微信
-	        第2，3步可以用企业微信提供的库函数VerifyURL来实现。
-
-	*/
-	// 解析出url上的参数值如下：
-	// verifyMsgSign := HttpUtils.ParseUrl("msg_signature")
-	verifyMsgSign := "5c45ff5e21c57e6ad56bac8758b79b1d9ac89fd3"
-	// verifyTimestamp := HttpUtils.ParseUrl("timestamp")
-	verifyTimestamp := "1409659589"
-	// verifyNonce := HttpUtils.ParseUrl("nonce")
-	verifyNonce := "263014780"
-	// verifyEchoStr := HttpUtils.ParseUrl("echoStr")
-	verifyEchoStr := "P9nAzCzyDtyTWESHep1vC5X9xho/qYX3Zpb4yKa9SKld1DsH3Iyt3tP3zNdtp+4RPcs8TgAE7OaBO+FZXvnaqQ=="
-	echoStr, cryptErr := wxcpt.VerifyURL(verifyMsgSign, verifyTimestamp, verifyNonce, verifyEchoStr)
-	if nil != cryptErr {
-		fmt.Println("verifyUrl fail", cryptErr)
+// 处理 GET 请求 - 验证回调 URL
+func verifyURLHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
-	fmt.Println("verifyUrl success echoStr", string(echoStr))
-	// 验证URL成功，将sEchoStr返回
-	// HttpUtils.SetResponse(sEchoStr)
 
-	/*
-	   	------------使用示例二：对用户回复的消息解密---------------
-	   	用户回复消息或者点击事件响应时，企业会收到回调消息，此消息是经过企业微信加密之后的密文以post形式发送给企业，密文格式请参考官方文档
-	   	假设企业收到企业微信的回调消息如下：
-	   	POST /cgi-bin/wxpush? msg_signature=477715d11cdb4164915debcba66cb864d751f3e6&timestamp=1409659813&nonce=1372623149 HTTP/1.1
-	   	Host: qy.weixin.qq.com
-	   	Content-Length: 613
-	   	<xml>		<ToUserName><![CDATA[wx5823bf96d3bd56c7]]></ToUserName><Encrypt><![CDATA[RypEvHKD8QQKFhvQ6QleEB4J58tiPdvo+rtK1I9qca6aM/wvqnLSV5zEPeusUiX5L5X/0lWfrf0QADHHhGd3QczcdCUpj911L3vg3W/sYYvuJTs3TUUkSUXxaccAS0qhxchrRYt66wiSpGLYL42aM6A8dTT+6k4aSknmPj48kzJs8qLjvd4Xgpue06DOdnLxAUHzM6+kDZ+HMZfJYuR+LtwGc2hgf5gsijff0ekUNXZiqATP7PF5mZxZ3Izoun1s4zG4LUMnvw2r+KqCKIw+3IQH03v+BCA9nMELNqbSf6tiWSrXJB3LAVGUcallcrw8V2t9EL4EhzJWrQUax5wLVMNS0+rUPA3k22Ncx4XXZS9o0MBH27Bo6BpNelZpS+/uh9KsNlY6bHCmJU9p8g7m3fVKn28H3KDYA5Pl/T8Z1ptDAVe0lXdQ2YoyyH2uyPIGHBZZIs2pDBS8R07+qN+E7Q==]]></Encrypt>
-	   	<AgentID><![CDATA[218]]></AgentID>
-	   	</xml>
+	// 解析 URL 参数
+	query := r.URL.Query()
+	msgSignature := query.Get("msg_signature")
+	timestamp := query.Get("timestamp")
+	nonce := query.Get("nonce")
+	echostr := query.Get("echostr")
 
-	   	企业收到post请求之后应该：
-	        1.解析出url上的参数，包括消息体签名(msg_signature)，时间戳(timestamp)以及随机数字串(nonce)
-	        2.验证消息体签名的正确性。
-	        3.将post请求的数据进行xml解析，并将<Encrypt>标签的内容进行解密，解密出来的明文即是用户回复消息的明文，明文格式请参考官方文档
-	        第2，3步可以用企业微信提供的库函数DecryptMsg来实现。
-	*/
-	// reqMsgSign := HttpUtils.ParseUrl("msg_signature")
-	reqMsgSign := "477715d11cdb4164915debcba66cb864d751f3e6"
-	// reqTimestamp := HttpUtils.ParseUrl("timestamp")
-	reqTimestamp := "1409659813"
-	// reqNonce := HttpUtils.ParseUrl("nonce")
-	reqNonce := "1372623149"
-	// post请求的密文数据
-	// reqData = HttpUtils.PostData()
-	reqData := []byte("<xml><ToUserName><![CDATA[wx5823bf96d3bd56c7]]></ToUserName><Encrypt><![CDATA[RypEvHKD8QQKFhvQ6QleEB4J58tiPdvo+rtK1I9qca6aM/wvqnLSV5zEPeusUiX5L5X/0lWfrf0QADHHhGd3QczcdCUpj911L3vg3W/sYYvuJTs3TUUkSUXxaccAS0qhxchrRYt66wiSpGLYL42aM6A8dTT+6k4aSknmPj48kzJs8qLjvd4Xgpue06DOdnLxAUHzM6+kDZ+HMZfJYuR+LtwGc2hgf5gsijff0ekUNXZiqATP7PF5mZxZ3Izoun1s4zG4LUMnvw2r+KqCKIw+3IQH03v+BCA9nMELNqbSf6tiWSrXJB3LAVGUcallcrw8V2t9EL4EhzJWrQUax5wLVMNS0+rUPA3k22Ncx4XXZS9o0MBH27Bo6BpNelZpS+/uh9KsNlY6bHCmJU9p8g7m3fVKn28H3KDYA5Pl/T8Z1ptDAVe0lXdQ2YoyyH2uyPIGHBZZIs2pDBS8R07+qN+E7Q==]]></Encrypt><AgentID><![CDATA[218]]></AgentID></xml>")
-
-	msg, cryptErr := wxcpt.DecryptMsg(reqMsgSign, reqTimestamp, reqNonce, reqData)
-	if nil != cryptErr {
-		fmt.Println("DecryptMsg fail", cryptErr)
+	// URL 解码
+	decodedEchostr, err := url.QueryUnescape(echostr)
+	if err != nil {
+		log.Printf("URL decode error: %v", err)
+		http.Error(w, "Invalid echostr parameter", http.StatusBadRequest)
+		return
 	}
-	fmt.Println("after decrypt msg: ", string(msg))
-	// TODO: 解析出明文xml标签的内容进行处理
-	// For example:
 
+	// 验证 URL
+	echoStr, cryptErr := wxcpt.VerifyURL(msgSignature, timestamp, nonce, decodedEchostr)
+	if cryptErr != nil {
+		log.Printf("VerifyURL fail: %v", cryptErr)
+		http.Error(w, fmt.Sprintf("VerifyURL fail: %s", cryptErr.ErrMsg), http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("VerifyURL success, echoStr: %s", string(echoStr))
+	// 返回解密后的 echostr
+	w.Write(echoStr)
+}
+
+// 处理 POST 请求 - 解密消息
+func decryptMsgHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 解析 URL 参数
+	query := r.URL.Query()
+	msgSignature := query.Get("msg_signature")
+	timestamp := query.Get("timestamp")
+	nonce := query.Get("nonce")
+
+	// 读取 POST 数据
+	reqData, err := io.ReadAll(r.Body)
+	if err != nil {
+		log.Printf("Read body error: %v", err)
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
+		return
+	}
+	defer r.Body.Close()
+
+	// 解密消息
+	msg, cryptErr := wxcpt.DecryptMsg(msgSignature, timestamp, nonce, reqData)
+	if cryptErr != nil {
+		log.Printf("DecryptMsg fail: %v", cryptErr)
+		http.Error(w, fmt.Sprintf("DecryptMsg fail: %s", cryptErr.ErrMsg), http.StatusBadRequest)
+		return
+	}
+
+	log.Printf("DecryptMsg success, msg: %s", string(msg))
+
+	// 解析消息内容
 	var msgContent MsgContent
-	err := xml.Unmarshal(msg, &msgContent)
-	if nil != err {
-		fmt.Println("Unmarshal fail")
-	} else {
-		fmt.Println("struct", msgContent)
+	err = xml.Unmarshal(msg, &msgContent)
+	if err != nil {
+		log.Printf("Unmarshal fail: %v", err)
+		http.Error(w, "Failed to parse message", http.StatusInternalServerError)
+		return
 	}
 
-	/*
-	   	------------使用示例三：企业回复用户消息的加密---------------
-	   	企业被动回复用户的消息也需要进行加密，并且拼接成密文格式的xml串。
-	   	假设企业需要回复用户的明文如下：
-	   	<xml>
-	   	<ToUserName><![CDATA[mycreate]]></ToUserName>
-	   	<FromUserName><![CDATA[wx5823bf96d3bd56c7]]></FromUserName>
-	   	<CreateTime>1348831860</CreateTime>
-	   	<MsgType><![CDATA[text]]></MsgType>
-	   	<Content><![CDATA[this is a test]]></Content>
-	   	<MsgId>1234567890123456</MsgId>
-	   	<AgentID>128</AgentID>
-	   	</xml>
+	log.Printf("Parsed message: %+v", msgContent)
 
-	   	为了将此段明文回复给用户，企业应：
-	        1.自己生成时间时间戳(timestamp),随机数字串(nonce)以便生成消息体签名，也可以直接用从企业微信的post url上解析出的对应值。
-	        2.将明文加密得到密文。
-	        3.用密文，步骤1生成的timestamp,nonce和企业在企业微信设定的token生成消息体签名。
-	        4.将密文，消息体签名，时间戳，随机数字串拼接成xml格式的字符串，发送给企业。
-	        以上2，3，4步可以用企业微信提供的库函数EncryptMsg来实现。
-	*/
-	respData := "<xml><ToUserName><![CDATA[mycreate]]></ToUserName><FromUserName><![CDATA[wx5823bf96d3bd56c7]]></FromUserName><CreateTime>1348831860</CreateTime><MsgType><![CDATA[text]]></MsgType><Content><![CDATA[this is a test]]></Content><MsgId>1234567890123456</MsgId><AgentID>128</AgentID></xml>"
-	encryptMsg, cryptErr := wxcpt.EncryptMsg(respData, reqTimestamp, reqNonce)
-	if nil != cryptErr {
-		fmt.Println("DecryptMsg fail", cryptErr)
+	// 构造回复消息（示例：自动回复）
+	replyMsg := buildReplyMessage(&msgContent)
+
+	// 加密回复消息
+	timestampStr := strconv.FormatInt(time.Now().Unix(), 10)
+	nonceStr := strconv.FormatInt(time.Now().UnixNano(), 10)
+	encryptMsg, cryptErr := wxcpt.EncryptMsg(replyMsg, timestampStr, nonceStr)
+	if cryptErr != nil {
+		log.Printf("EncryptMsg fail: %v", cryptErr)
+		http.Error(w, fmt.Sprintf("EncryptMsg fail: %s", cryptErr.ErrMsg), http.StatusInternalServerError)
+		return
 	}
 
-	sEncryptMsg := string(encryptMsg)
-	fmt.Println("after encrypt sEncryptMsg: ", sEncryptMsg)
-	// 加密成功
-	// TODO:
-	// HttpUtils.SetResponse(sEncryptMsg)
+	log.Printf("EncryptMsg success")
+	w.Header().Set("Content-Type", "application/xml")
+	w.Write(encryptMsg)
+}
+
+// 构造回复消息
+func buildReplyMessage(msgContent *MsgContent) string {
+	now := time.Now().Unix()
+	replyContent := fmt.Sprintf("收到您的消息: %s", msgContent.Content)
+
+	replyMsg := fmt.Sprintf(`<xml>
+<ToUserName><![CDATA[%s]]></ToUserName>
+<FromUserName><![CDATA[%s]]></FromUserName>
+<CreateTime>%d</CreateTime>
+<MsgType><![CDATA[text]]></MsgType>
+<Content><![CDATA[%s]]></Content>
+<AgentID>%d</AgentID>
+</xml>`, msgContent.FromUsername, msgContent.ToUsername, now, replyContent, msgContent.Agentid)
+
+	return replyMsg
+}
+
+func main() {
+	http.HandleFunc("/cgi-bin/wxpush", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			verifyURLHandler(w, r)
+		} else if r.Method == http.MethodPost {
+			decryptMsgHandler(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+
+	port := ":8090"
+	log.Printf("Starting HTTP server on port %s", port)
+	log.Printf("GET /cgi-bin/wxpush - 验证回调 URL")
+	log.Printf("POST /cgi-bin/wxpush - 接收并解密消息")
+
+	if err := http.ListenAndServe(port, nil); err != nil {
+		log.Fatalf("Server failed to start: %v", err)
+	}
 }
